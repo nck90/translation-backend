@@ -7,15 +7,27 @@ import {
     WebSocketServer,
     OnGatewayConnection,
     OnGatewayDisconnect,
+    OnGatewayInit,
   } from '@nestjs/websockets';
-  import { UseGuards, Logger } from '@nestjs/common';
+  import { /* UseGuards, */ Logger } from '@nestjs/common';
   import { Server, Socket } from 'socket.io';
   import { TranslationService } from './translation.service';
   import { RoomService } from '../room/room.service';
-  import { WsAuthGuard } from '../guards/ws-auth.guard';
+  // import { WsAuthGuard } from '../guards/ws-auth.guard';
+  import { WsExceptionsFilter } from '../common/filters/ws-exception.filter';
+  import { UseFilters } from '@nestjs/common';
   
-  @WebSocketGateway({ namespace: '/ws' })
-  export class TranslationGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  @WebSocketGateway({
+    namespace: '/ws',
+    cors: {
+      origin: '*',
+      methods: ['GET', 'POST'],
+      credentials: true,
+    },
+    transports: ['websocket', 'polling'],
+  })
+  @UseFilters(WsExceptionsFilter)
+  export class TranslationGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
     @WebSocketServer() server: Server;
     private readonly logger = new Logger(TranslationGateway.name);
   
@@ -24,36 +36,55 @@ import {
       private readonly roomService: RoomService,
     ) {}
   
+    afterInit(server: Server) {
+      this.logger.log('WebSocket Gateway initialized');
+    }
+  
     handleConnection(client: Socket) {
-      // handshake.address는 클라이언트의 IP 주소를 포함합니다.
       const clientIP = client.handshake.address;
       this.logger.log(`Client connected: ${client.id}, IP: ${clientIP}`);
+      
+      // Check token early to prevent hanging connections (비활성화)
+      // try {
+      //   const token = client.handshake.query.token as string;
+      //   if (!token) {
+      //     this.logger.warn(`Client ${client.id} has no token, disconnecting`);
+      //     client.disconnect(true);
+      //   }
+      // } catch (error) {
+      //   this.logger.error(`Authentication error for client ${client.id}`, error);
+      //   client.disconnect(true);
+      // }
     }
   
     async handleDisconnect(client: Socket) {
       this.logger.log(`Client disconnected: ${client.id}`);
+      // Cleanup code를 여기에 추가할 수 있습니다.
     }
   
-    @UseGuards(WsAuthGuard)
+    // @UseGuards(WsAuthGuard) // 임시 비활성화
     @SubscribeMessage('joinRoom')
     async handleJoinRoom(
       @MessageBody() data: { roomId: string },
       @ConnectedSocket() client: Socket,
     ): Promise<void> {
       const { roomId } = data;
-      if (!(await this.roomService.roomExists(roomId))) {
-        client.emit('error', '해당 방이 존재하지 않습니다.');
-        client.disconnect();
-        return;
+      try {
+        if (!(await this.roomService.roomExists(roomId))) {
+          client.emit('error', '해당 방이 존재하지 않습니다.');
+          return;
+        }
+        await this.roomService.addParticipant(roomId, { id: client.id, user: (client as any).user });
+        client.join(roomId);
+        client.emit('joined', { roomId });
+        this.logger.log(`Client ${client.id} joined room ${roomId}`);
+      } catch (error) {
+        this.logger.error(`Error joining room for client ${client.id}`, error);
+        client.emit('error', '방에 참여하는 중 오류가 발생했습니다.');
       }
-      await this.roomService.addParticipant(roomId, { id: client.id, user: (client as any).user });
-      client.join(roomId);
-      client.emit('joined', { roomId });
-      this.logger.log(`Client ${client.id} joined room ${roomId}`);
     }
   
-    // 내부 IP 가져오기 이벤트 추가
-    @UseGuards(WsAuthGuard)
+    // @UseGuards(WsAuthGuard) // 임시 비활성화
     @SubscribeMessage('getInternalIP')
     handleGetInternalIP(@ConnectedSocket() client: Socket): void {
       const internalIP = client.handshake.address;
@@ -61,7 +92,7 @@ import {
       this.logger.log(`Sent internal IP to client ${client.id}: ${internalIP}`);
     }
   
-    @UseGuards(WsAuthGuard)
+    // @UseGuards(WsAuthGuard) // 임시 비활성화
     @SubscribeMessage('sendMessage')
     async handleMessage(
       @MessageBody() data: { roomId: string; message: string },

@@ -1,25 +1,38 @@
 // src/guards/ws-auth.guard.ts
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/common';
+import { WsException } from '@nestjs/websockets';
 import * as jwt from 'jsonwebtoken';
 
 @Injectable()
 export class WsAuthGuard implements CanActivate {
+  private readonly logger = new Logger(WsAuthGuard.name);
+
   canActivate(context: ExecutionContext): boolean {
-    const client = context.switchToWs().getClient();
-    const token = client.handshake.query.token as string;
-
-    if (!token) {
-      return false;
-    }
-
     try {
-      const secret = process.env.JWT_SECRET || 'secret';
-      const decoded = jwt.verify(token, secret);
-      // decoded 값을 클라이언트 객체에 할당하여 이후 이벤트 처리 시 활용할 수 있습니다.
-      (client as any).user = decoded;
-      return true;
+      const client = context.switchToWs().getClient();
+      const token = client.handshake.query.token as string;
+
+      if (!token) {
+        this.logger.warn('No token provided for WebSocket connection');
+        throw new WsException('Authentication error: No token provided');
+      }
+
+      try {
+        const secret = process.env.JWT_SECRET || 'secret';
+        const decoded = jwt.verify(token, secret);
+        // Save decoded user info to the client object
+        (client as any).user = decoded;
+        return true;
+      } catch (error) {
+        this.logger.error('JWT verification failed', error);
+        throw new WsException('Authentication error: Invalid token');
+      }
     } catch (error) {
-      return false;
+      this.logger.error('WebSocket authentication failed', error);
+      if (error instanceof WsException) {
+        throw error;
+      }
+      throw new WsException('Authentication failed');
     }
   }
 }
